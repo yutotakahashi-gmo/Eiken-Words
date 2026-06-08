@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Eiken Icon — Canvas Components</title>
+<style>
+  body { background: #0f172a; color: #e2e8f0; font-family: system-ui, sans-serif; padding: 20px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; max-width: 1200px; }
+  .cell { background: #1e293b; padding: 14px; border-radius: 8px; }
+  .cell h3 { margin: 0 0 8px; font-size: 14px; color: #94a3b8; font-weight: 600; }
+  .cell canvas { display: block; width: 200px; height: 200px; background: #000; border-radius: 8px; }
+  pre { background: #0a0f1e; padding: 14px; border-radius: 8px; overflow-x: auto; font-size: 12px; max-width: 1200px; margin-top: 24px; }
+  h1 { font-size: 20px; }
+  .controls { margin: 16px 0; }
+  .controls label { margin-right: 14px; }
+  .controls input[type=text] { width: 60px; padding: 4px; font-size: 16px; }
+  .controls input[type=color] { vertical-align: middle; }
+</style>
+</head>
+<body>
+<h1>Eiken アイコン — Canvas 要素分解</h1>
+<p>下記の各 cell は独立した描画ステップ。<b>最終</b> = ぜんぶ重ねた完成版。</p>
+
+<div class="controls">
+  <label>文字: <input type="text" id="ctrl-letter" value="E" maxlength="2"></label>
+  <label>背景色1: <input type="color" id="ctrl-bg1" value="#aa3424"></label>
+  <label>背景色2: <input type="color" id="ctrl-bg2" value="#781818"></label>
+  <label>文字色: <input type="color" id="ctrl-fg" value="#f5ebd7"></label>
+  <button onclick="renderAll()">再描画</button>
+  <button onclick="downloadFinal()">PNG 書き出し</button>
+</div>
+
+<div class="grid">
+  <div class="cell"><h3>① ベース矩形（角丸 + ベース色）</h3><canvas id="c1" width="400" height="400"></canvas></div>
+  <div class="cell"><h3>② 放射グラデーション</h3><canvas id="c2" width="400" height="400"></canvas></div>
+  <div class="cell"><h3>③ ぼかし</h3><canvas id="c3" width="400" height="400"></canvas></div>
+  <div class="cell"><h3>④ 文字の影</h3><canvas id="c4" width="400" height="400"></canvas></div>
+  <div class="cell"><h3>⑤ 文字本体（セリフ体）</h3><canvas id="c5" width="400" height="400"></canvas></div>
+  <div class="cell"><h3>⑥ 最終合成</h3><canvas id="cFinal" width="400" height="400"></canvas></div>
+</div>
+
+<h2 style="margin-top:32px">コード（コピペで使えます）</h2>
+<pre id="code-out"></pre>
+
+<script>
+// ============================================================
+// Eiken アイコン Canvas コンポーネント集
+// 各関数は独立して呼び出し可能。順番に積み重ねるのが基本。
+// ============================================================
+
+/**
+ * ① ベース矩形を描く（角丸 + ベース色塗り）
+ * iOS は自動で角丸つけるので、Web用なら ratio=0.225、書き出しだけなら ratio=0
+ */
+function drawBaseRect(ctx, size, color, cornerRatio = 0.225) {
+  const r = size * cornerRatio;
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(r, 0);
+  ctx.arcTo(size, 0, size, size, r);
+  ctx.arcTo(size, size, 0, size, r);
+  ctx.arcTo(0, size, 0, 0, r);
+  ctx.arcTo(0, 0, size, 0, r);
+  ctx.closePath();
+  ctx.clip();
+  ctx.fillStyle = color;
+  ctx.fillRect(0, 0, size, size);
+  ctx.restore();
+}
+
+/**
+ * ② 放射グラデーションを上に重ねる
+ * 中心（上寄り）から外側へ：明るい→暗いの自然な減光
+ */
+function drawRadialGradient(ctx, size, innerColor, outerColor) {
+  const cx = size / 2;
+  const cy = size * 0.45;   // 中心を少し上に
+  const r1 = 0;
+  const r2 = size * 0.75;
+  ctx.save();
+  // 角丸でクリップ
+  clipRoundedRect(ctx, size);
+  const grad = ctx.createRadialGradient(cx, cy, r1, cx, cy, r2);
+  grad.addColorStop(0,    innerColor);
+  grad.addColorStop(1,    outerColor);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, size, size);
+  ctx.restore();
+}
+
+/**
+ * ③ ぼかし（filter API。Safari 18+/Chrome OK）
+ * 重ねた成果物全体に弱いぼかしをかけて柔らかい印象に
+ */
+function applyBlur(ctx, size, blurPx = 3) {
+  const data = ctx.getImageData(0, 0, size, size);
+  const tmp = document.createElement('canvas');
+  tmp.width = tmp.height = size;
+  const tctx = tmp.getContext('2d');
+  tctx.putImageData(data, 0, 0);
+  ctx.save();
+  clipRoundedRect(ctx, size);
+  ctx.filter = `blur(${blurPx}px)`;
+  ctx.clearRect(0, 0, size, size);
+  ctx.drawImage(tmp, 0, 0);
+  ctx.filter = 'none';
+  ctx.restore();
+}
+
+/**
+ * ④ 文字の影（下にオフセット + ぼかし + 暗赤）
+ * 立体感を出すための要。位置と色を別関数化しておく
+ */
+function drawLetterShadow(ctx, size, letter, opts = {}) {
+  const {
+    font = 'bold 0.65em "Georgia", "Times New Roman", serif',
+    color = 'rgba(60, 12, 18, 0.7)',
+    offsetX = size * 0.012,
+    offsetY = size * 0.018,
+    blur = size * 0.015
+  } = opts;
+  ctx.save();
+  clipRoundedRect(ctx, size);
+  // size 比率で font-size 計算
+  ctx.font = `bold ${Math.round(size * 0.65)}px "Georgia", "Times New Roman", serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = color;
+  ctx.shadowColor = color;
+  ctx.shadowBlur = blur;
+  ctx.fillText(letter, size / 2 + offsetX, size * 0.52 + offsetY);
+  ctx.restore();
+}
+
+/**
+ * ⑤ 文字本体（クリーム色、セリフ体）
+ */
+function drawLetterFill(ctx, size, letter, color = '#f5ebd7') {
+  ctx.save();
+  clipRoundedRect(ctx, size);
+  ctx.font = `bold ${Math.round(size * 0.65)}px "Georgia", "Times New Roman", serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = color;
+  ctx.fillText(letter, size / 2, size * 0.52);
+  ctx.restore();
+}
+
+/**
+ * ヘルパー：角丸クリッピング
+ */
+function clipRoundedRect(ctx, size, cornerRatio = 0.225) {
+  const r = size * cornerRatio;
+  ctx.beginPath();
+  ctx.moveTo(r, 0);
+  ctx.arcTo(size, 0, size, size, r);
+  ctx.arcTo(size, size, 0, size, r);
+  ctx.arcTo(0, size, 0, 0, r);
+  ctx.arcTo(0, 0, size, 0, r);
+  ctx.closePath();
+  ctx.clip();
+}
+
+/**
+ * 全部入り：完成品を描く（ワンショット用）
+ */
+function drawFullIcon(ctx, size, opts = {}) {
+  const {
+    letter = 'E',
+    bgInner = '#aa3424',
+    bgOuter = '#781818',
+    fgColor = '#f5ebd7',
+    shadowColor = 'rgba(60, 12, 18, 0.7)'
+  } = opts;
+  ctx.clearRect(0, 0, size, size);
+  drawBaseRect(ctx, size, bgOuter);            // ① 暗いベース
+  drawRadialGradient(ctx, size, bgInner, bgOuter); // ② グラデ
+  drawLetterShadow(ctx, size, letter, { color: shadowColor }); // ④ 影
+  drawLetterFill(ctx, size, letter, fgColor);  // ⑤ 文字
+}
+
+// ============================================================
+// レンダリング：各セルに段階を描画
+// ============================================================
+function renderAll() {
+  const letter = document.getElementById('ctrl-letter').value || 'E';
+  const bg1 = document.getElementById('ctrl-bg1').value;
+  const bg2 = document.getElementById('ctrl-bg2').value;
+  const fg = document.getElementById('ctrl-fg').value;
+  const S = 400;
+
+  // ① ベース矩形のみ
+  let ctx = document.getElementById('c1').getContext('2d');
+  ctx.clearRect(0, 0, S, S);
+  drawBaseRect(ctx, S, bg2);
+
+  // ② ベース + グラデ
+  ctx = document.getElementById('c2').getContext('2d');
+  ctx.clearRect(0, 0, S, S);
+  drawBaseRect(ctx, S, bg2);
+  drawRadialGradient(ctx, S, bg1, bg2);
+
+  // ③ 上記をぼかし
+  ctx = document.getElementById('c3').getContext('2d');
+  ctx.clearRect(0, 0, S, S);
+  drawBaseRect(ctx, S, bg2);
+  drawRadialGradient(ctx, S, bg1, bg2);
+  applyBlur(ctx, S, 4);
+
+  // ④ 影だけ（背景なしで分かりやすく）
+  ctx = document.getElementById('c4').getContext('2d');
+  ctx.clearRect(0, 0, S, S);
+  drawBaseRect(ctx, S, bg2);
+  drawRadialGradient(ctx, S, bg1, bg2);
+  drawLetterShadow(ctx, S, letter);
+
+  // ⑤ 文字だけ重ねた版
+  ctx = document.getElementById('c5').getContext('2d');
+  ctx.clearRect(0, 0, S, S);
+  drawBaseRect(ctx, S, bg2);
+  drawRadialGradient(ctx, S, bg1, bg2);
+  drawLetterFill(ctx, S, letter, fg);
+
+  // ⑥ 最終
+  ctx = document.getElementById('cFinal').getContext('2d');
+  drawFullIcon(ctx, S, {
+    letter, bgInner: bg1, bgOuter: bg2, fgColor: fg
+  });
+
+  // コード表示
+  document.getElementById('code-out').textContent =
+`// 使い方（コピペ）
+const canvas = document.getElementById('myCanvas');
+const ctx = canvas.getContext('2d');
+const SIZE = canvas.width;  // = canvas.height
+
+drawFullIcon(ctx, SIZE, {
+  letter: '${letter}',
+  bgInner: '${bg1}',
+  bgOuter: '${bg2}',
+  fgColor: '${fg}',
+  shadowColor: 'rgba(60, 12, 18, 0.7)'
+});
+
+// 個別に呼ぶ場合：
+// drawBaseRect(ctx, SIZE, '${bg2}');
+// drawRadialGradient(ctx, SIZE, '${bg1}', '${bg2}');
+// drawLetterShadow(ctx, SIZE, '${letter}');
+// drawLetterFill(ctx, SIZE, '${letter}', '${fg}');`;
+}
+
+function downloadFinal() {
+  const canvas = document.getElementById('cFinal');
+  const a = document.createElement('a');
+  a.download = 'eiken_icon.png';
+  a.href = canvas.toDataURL('image/png');
+  a.click();
+}
+
+renderAll();
+</script>
+</body>
+</html>
